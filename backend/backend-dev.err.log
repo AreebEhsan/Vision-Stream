@@ -2,3 +2,23 @@ INFO:     Started server process [24440]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:63250 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:55671 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:64338 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:61698 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:63163 - "WebSocket /ws" [accepted]
+INFO:     connection open
+INFO:     connection closed
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FFE73ABD64D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FFE7512E8D7  Unknown               Unknown  Unknown
+ntdll.dll          00007FFE7624C40C  Unknown               Unknown  Unknown
