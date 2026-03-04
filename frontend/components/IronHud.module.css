@@ -1,0 +1,217 @@
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+  color: #8ee8ff;
+  text-shadow: 0 0 8px rgba(86, 219, 255, 0.6);
+}
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(7, 28, 46, 0) 45%, rgba(7, 28, 46, 0.45) 100%),
+    linear-gradient(180deg, rgba(120, 30, 18, 0.2) 0%, rgba(6, 22, 36, 0.05) 25%, rgba(6, 22, 36, 0.4) 100%);
+}
+
+.scanlines {
+  position: absolute;
+  inset: 0;
+  opacity: 0.24;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(111, 224, 255, 0.14) 0px,
+    rgba(111, 224, 255, 0.14) 1px,
+    transparent 2px,
+    transparent 5px
+  );
+}
+
+.sweep {
+  position: absolute;
+  inset: -10% 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(101, 238, 255, 0.3) 45%,
+    rgba(101, 238, 255, 0.04) 55%,
+    transparent 100%
+  );
+  animation: hudSweep 2.8s linear infinite;
+  mix-blend-mode: screen;
+}
+
+.svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.reticleWrap {
+  position: absolute;
+  width: 116px;
+  height: 116px;
+  transform: translate(-50%, -50%);
+  transition: left 120ms linear, top 120ms linear;
+}
+
+.reticleSvg {
+  width: 100%;
+  height: 100%;
+}
+
+.ringOuter {
+  fill: none;
+  stroke: rgba(98, 225, 255, 0.58);
+  stroke-width: 1.2;
+  stroke-dasharray: 7 8;
+  transform-origin: center;
+  animation: ringRotate 16s linear infinite;
+}
+
+.ringInner {
+  fill: none;
+  stroke: rgba(108, 239, 255, 0.7);
+  stroke-width: 1;
+  stroke-dasharray: 2 7;
+  transform-origin: center;
+  animation: ringRotateReverse 8s linear infinite;
+}
+
+.reticle {
+  stroke: rgba(101, 239, 255, 0.9);
+  stroke-width: 1.4;
+}
+
+.corner {
+  stroke: rgba(120, 244, 255, 0.85);
+  stroke-width: 2;
+  fill: none;
+}
+
+.dataPanel {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  min-width: 200px;
+  background: rgba(6, 21, 34, 0.6);
+  border: 1px solid rgba(120, 244, 255, 0.42);
+  border-radius: 10px;
+  padding: 10px 12px;
+  backdrop-filter: blur(3px);
+  font-family: "Geist Mono", "Consolas", monospace;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+}
+
+.panelTitle {
+  color: #b8f7ff;
+  margin-bottom: 6px;
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.panelRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 3px;
+}
+
+.panelValue {
+  color: #d8fcff;
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+  margin-right: 7px;
+  background: #ff6f6f;
+  box-shadow: 0 0 7px rgba(255, 115, 115, 0.9);
+}
+
+.statusOn {
+  background: #7dffb9;
+  box-shadow: 0 0 8px rgba(125, 255, 185, 0.95);
+}
+
+.systemTag {
+  position: absolute;
+  right: 14px;
+  bottom: 92px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(120, 244, 255, 0.4);
+  background: rgba(8, 28, 45, 0.6);
+  font-family: "Geist Mono", "Consolas", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #d7fcff;
+}
+
+.lockTag {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 199, 122, 0.45);
+  background: rgba(34, 20, 8, 0.6);
+  font-family: "Geist Mono", "Consolas", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #ffe4bc;
+  max-width: min(50%, 320px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes hudSweep {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes ringRotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ringRotateReverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .dataPanel {
+    min-width: 160px;
+    font-size: 10px;
+    padding: 8px 10px;
+  }
+
+  .systemTag {
+    font-size: 9px;
+    padding: 6px 9px;
+  }
+
+  .reticleWrap {
+    width: 90px;
+    height: 90px;
+  }
+}
