@@ -64,6 +64,13 @@ export default function RealtimeDetector() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const sendingRef = useRef(false);
+  const awaitingResponseRef = useRef(false);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectEnabledRef = useRef(false);
+  const frameCounterRef = useRef(0);
+  const messageCounterRef = useRef(0);
+  const runningRef = useRef(false);
 
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<string>("Idle");
@@ -77,8 +84,24 @@ export default function RealtimeDetector() {
 
   const fpsRef = useRef(fps);
   const jpegQualityRef = useRef(jpegQuality);
+  const isProd = process.env.NODE_ENV === "production";
 
-  const wsUrl = useMemo(() => process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws", []);
+  const configError = useMemo(() => {
+    if (!isProd) return null;
+    if (!process.env.NEXT_PUBLIC_WS_URL) return "Missing NEXT_PUBLIC_WS_URL in production";
+    if (!process.env.NEXT_PUBLIC_API_URL) return "Missing NEXT_PUBLIC_API_URL in production";
+    return null;
+  }, [isProd]);
+
+  const wsUrl = useMemo(() => {
+    if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
+    return "ws://localhost:8000/ws";
+  }, []);
+
+  const apiUrl = useMemo(() => {
+    if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+    return "http://localhost:8000";
+  }, []);
 
   const selectedDetection = useMemo(
     () => lastDetections.find((d) => d.track_id === selectedTrackId) ?? null,
@@ -114,6 +137,10 @@ export default function RealtimeDetector() {
   }, [jpegQuality]);
 
   useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
     const onResize = () => setIsNarrow(window.innerWidth < 1100);
     onResize();
     window.addEventListener("resize", onResize);
@@ -143,6 +170,34 @@ export default function RealtimeDetector() {
     video.srcObject = null;
   }
 
+  function prodLog(...args: unknown[]) {
+    if (isProd) {
+      console.log("[vision]", ...args);
+    }
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }
+
+  function scheduleReconnect(reason: string) {
+    if (!runningRef.current || !reconnectEnabledRef.current) return;
+    if (reconnectTimerRef.current) return;
+
+    reconnectAttemptRef.current += 1;
+    const delay = Math.min(10000, 500 * 2 ** Math.min(6, reconnectAttemptRef.current - 1));
+    setStatus(`Reconnecting in ${Math.round(delay / 1000)}s...`);
+    prodLog("WS reconnect scheduled", { reason, delayMs: delay, attempt: reconnectAttemptRef.current });
+
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      connectWS();
+    }, delay);
+  }
+
   function connectWS() {
     if (
       wsRef.current &&
@@ -155,11 +210,26 @@ export default function RealtimeDetector() {
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
 
-    ws.onopen = () => setStatus("WS connected");
-    ws.onclose = () => setStatus("WS closed");
-    ws.onerror = () => setStatus("WS error");
+    ws.onopen = () => {
+      reconnectAttemptRef.current = 0;
+      awaitingResponseRef.current = false;
+      setStatus("WS connected");
+      prodLog("WS open", wsUrl);
+    };
+    ws.onclose = () => {
+      awaitingResponseRef.current = false;
+      setStatus("WS closed");
+      prodLog("WS closed");
+      scheduleReconnect("close");
+    };
+    ws.onerror = () => {
+      setStatus("WS error");
+      prodLog("WS error event");
+      scheduleReconnect("error");
+    };
 
     ws.onmessage = (ev) => {
+      awaitingResponseRef.current = false;
       try {
         const data: ServerPayload = JSON.parse(ev.data);
         if (data.error) {
@@ -190,8 +260,17 @@ export default function RealtimeDetector() {
         });
 
         drawOverlay(detections);
+
+        messageCounterRef.current += 1;
+        if (messageCounterRef.current % 30 === 0) {
+          prodLog("WS message", {
+            count: messageCounterRef.current,
+            detections: detections.length,
+            inferenceMs: data.ms ?? 0,
+          });
+        }
       } catch {
-        // ignore parse errors
+        prodLog("WS message parse error");
       }
     };
 
@@ -203,6 +282,8 @@ export default function RealtimeDetector() {
       wsRef.current.close();
       wsRef.current = null;
     }
+    awaitingResponseRef.current = false;
+    clearReconnectTimer();
   }
 
   function drawOverlay(detections: Detection[]) {
@@ -358,7 +439,7 @@ export default function RealtimeDetector() {
 
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (!video || !cap) return;
-    if (sendingRef.current) return;
+    if (sendingRef.current || awaitingResponseRef.current) return;
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
@@ -382,8 +463,33 @@ export default function RealtimeDetector() {
 
       const buf = await blob.arrayBuffer();
       ws.send(buf);
+      awaitingResponseRef.current = true;
+      frameCounterRef.current += 1;
+      if (frameCounterRef.current % 30 === 0) {
+        prodLog("WS send", { count: frameCounterRef.current, bytes: buf.byteLength });
+      }
     } finally {
       sendingRef.current = false;
+    }
+  }
+
+  async function wakeBackend() {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12000);
+    try {
+      setStatus("Warming up server...");
+      const res = await fetch(`${apiUrl}/health`, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        prodLog("Health check non-200", res.status);
+      }
+    } catch (err) {
+      prodLog("Health check failed", err);
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 
@@ -393,6 +499,7 @@ export default function RealtimeDetector() {
 
     let timer: number | null = null;
     let cancelled = false;
+    reconnectEnabledRef.current = true;
 
     async function loop() {
       if (cancelled) return;
@@ -407,7 +514,14 @@ export default function RealtimeDetector() {
     setStatus("Starting...");
     (async () => {
       try {
+        if (configError) {
+          setStatus(configError);
+          setRunning(false);
+          return;
+        }
         await startCamera();
+        if (cancelled) return;
+        await wakeBackend();
         if (cancelled) return;
         connectWS();
         if (cancelled) return;
@@ -422,10 +536,13 @@ export default function RealtimeDetector() {
 
     return () => {
       cancelled = true;
+      reconnectEnabledRef.current = false;
       if (timer) window.clearTimeout(timer);
+      clearReconnectTimer();
       stopCamera();
       disconnectWS();
       sendingRef.current = false;
+      awaitingResponseRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running]);
@@ -448,9 +565,12 @@ export default function RealtimeDetector() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      reconnectEnabledRef.current = false;
       stopCamera();
       disconnectWS();
+      clearReconnectTimer();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleStop() {

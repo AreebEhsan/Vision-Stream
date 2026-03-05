@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,9 +9,23 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
 
 app = FastAPI()
+
+cors_origins_raw = os.getenv("CORS_ALLOW_ORIGINS", "")
+cors_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+if not cors_origins:
+    cors_origins = ["http://localhost:3000"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Load a fast general-purpose detector (COCO 80 classes)
 # Options: yolov8n.pt (fastest), yolov8s.pt (better), yolov8m.pt (heavier)
@@ -58,6 +73,16 @@ REAL_WORLD_WIDTH_M: Dict[str, float] = {
     "cell phone": 0.07,
     "laptop": 0.33,
 }
+
+
+@app.get("/")
+async def root() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    return {"status": "ok"}
 
 
 def decode_jpeg_bytes_to_bgr(jpeg_bytes: bytes) -> np.ndarray:
@@ -296,7 +321,7 @@ def process_jpeg_frame(jpeg_bytes: bytes, tracker: SimpleTracker) -> Dict[str, A
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("WS client connected")
+    print("WS connected:", websocket.client)
     tracker = SimpleTracker()
 
     try:
@@ -305,6 +330,7 @@ async def ws_endpoint(websocket: WebSocket):
 
             if "bytes" in msg and msg["bytes"] is not None:
                 jpeg_bytes = msg["bytes"]
+                print("WS frame bytes:", len(jpeg_bytes))
             elif "text" in msg and msg["text"] is not None:
                 await websocket.send_text(
                     json.dumps({"error": "Text frames not supported in this MVP."})
@@ -314,14 +340,26 @@ async def ws_endpoint(websocket: WebSocket):
                 continue
 
             try:
+                t0 = time.time()
+                print("Inference start")
                 payload = await asyncio.to_thread(process_jpeg_frame, jpeg_bytes, tracker)
+                elapsed_ms = int((time.time() - t0) * 1000)
+                print("Inference done ms:", elapsed_ms)
                 await websocket.send_text(json.dumps(payload))
+                print("Sent detections:", len(payload.get("detections", [])))
             except Exception as e:
+                print("Frame processing error:", str(e))
                 await websocket.send_text(json.dumps({"error": str(e)}))
 
             await asyncio.sleep(0)
 
     except WebSocketDisconnect:
-        print("WS client disconnected")
+        print("WS disconnected:", websocket.client)
     except Exception as e:
         print("WS error:", e)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

@@ -1,4 +1,10 @@
-import RealtimeDetector from "@/components/RealtimeDetector";
+"use client";
+
+import dynamic from "next/dynamic";
+
+const RealtimeDetector = dynamic(() => import("@/components/RealtimeDetector"), {
+  ssr: false,
+});
 
 export default function Home() {
   return (
