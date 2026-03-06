@@ -86,10 +86,25 @@ export default function RealtimeDetector() {
   const jpegQualityRef = useRef(jpegQuality);
   const isProd = process.env.NODE_ENV === "production";
 
+  function deriveApiUrlFromWsUrl(rawWsUrl: string): string | null {
+    try {
+      const parsed = new URL(rawWsUrl);
+      const proto = parsed.protocol === "wss:" ? "https:" : "http:";
+      const wsPath = parsed.pathname || "";
+      const basePath = wsPath.endsWith("/ws") ? wsPath.slice(0, -3) : wsPath;
+      return `${proto}//${parsed.host}${basePath || ""}`;
+    } catch {
+      return null;
+    }
+  }
+
   const configError = useMemo(() => {
     if (!isProd) return null;
-    if (!process.env.NEXT_PUBLIC_WS_URL) return "Missing NEXT_PUBLIC_WS_URL in production";
-    if (!process.env.NEXT_PUBLIC_API_URL) return "Missing NEXT_PUBLIC_API_URL in production";
+    const hasWs = Boolean(process.env.NEXT_PUBLIC_WS_URL);
+    const hasApi = Boolean(process.env.NEXT_PUBLIC_API_URL);
+    if (!hasWs && !hasApi) {
+      return "Missing NEXT_PUBLIC_WS_URL and NEXT_PUBLIC_API_URL in production";
+    }
     return null;
   }, [isProd]);
 
@@ -100,6 +115,10 @@ export default function RealtimeDetector() {
 
   const apiUrl = useMemo(() => {
     if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+    if (process.env.NEXT_PUBLIC_WS_URL) {
+      const derived = deriveApiUrlFromWsUrl(process.env.NEXT_PUBLIC_WS_URL);
+      if (derived) return derived;
+    }
     return "http://localhost:8000";
   }, []);
 

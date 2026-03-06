@@ -38,16 +38,23 @@ export default function MiniAtcGlobe() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: number | null = null;
+    let backoffMs = 15000;
 
     const tick = async () => {
       try {
         const res = await fetch(OPENSKY_URL, { cache: "no-store" });
-        if (!res.ok) throw new Error(String(res.status));
+        if (!res.ok) {
+          const err = new Error(String(res.status));
+          (err as Error & { status?: number }).status = res.status;
+          throw err;
+        }
         const data = (await res.json()) as OpenSkyResponse;
         if (!cancelled) {
           setFlights(parseFlights(data));
           setLastSync(Date.now());
           setMode("live");
+          backoffMs = 15000;
         }
       } catch {
         if (!cancelled) {
@@ -60,15 +67,21 @@ export default function MiniAtcGlobe() {
               lon: -180 + ((i * 31) % 360),
             }));
           });
+          backoffMs = Math.min(backoffMs * 2, 120000);
+        }
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(tick, backoffMs);
         }
       }
     };
 
     tick();
-    const interval = window.setInterval(tick, 15000);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 
