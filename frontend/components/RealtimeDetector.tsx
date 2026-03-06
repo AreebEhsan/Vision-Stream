@@ -463,6 +463,7 @@ export default function RealtimeDetector() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
     if (!vw || !vh) return;
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
     sendingRef.current = true;
     try {
@@ -472,7 +473,12 @@ export default function RealtimeDetector() {
       const cctx = cap.getContext("2d");
       if (!cctx) return;
 
-      cctx.drawImage(video, 0, 0, vw, vh);
+      try {
+        cctx.drawImage(video, 0, 0, vw, vh);
+      } catch (err) {
+        prodLog("drawImage failed", err);
+        return;
+      }
 
       const blob: Blob | null = await new Promise((resolve) =>
         cap.toBlob((b) => resolve(b), "image/jpeg", jpegQualityRef.current)
@@ -524,7 +530,11 @@ export default function RealtimeDetector() {
       if (cancelled) return;
 
       const interval = Math.max(33, Math.floor(1000 / fpsRef.current));
-      await sendFrameOnce();
+      try {
+        await sendFrameOnce();
+      } catch (err) {
+        prodLog("sendFrameOnce failed", err);
+      }
       if (!cancelled) {
         timer = window.setTimeout(loop, interval);
       }
