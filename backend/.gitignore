@@ -1,10 +1,26 @@
+# --- Python / Backend ---
 __pycache__/
 *.py[cod]
 *.pyo
-
-# Local virtual environments
+.python-version
+# Ignore the specific venv you created
+.venv311/
+# Catch-all for other venv names
 .venv/
 venv/
+env/
+# Environment variables (Sensitive info!)
+.env
+.env.*
 
-# Large local model files (opt-in if you want to version them)
+# --- Machine Learning ---
+# Ignore weights and large models (YOLO/PyTorch)
 *.pt
+*.pth
+*.onnx
+# Ignore the Ultralytics settings/data cache
+datasets/
+runs/
+
+# --- Logs ---
+*.log

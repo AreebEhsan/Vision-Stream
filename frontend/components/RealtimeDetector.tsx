@@ -31,6 +31,20 @@ type ServerPayload = {
   error?: string;
 };
 
+type PosePoint = {
+  x: number;
+  y: number;
+  visibility?: number;
+};
+
+const POSE_CONNECTIONS: Array<[number, number]> = [
+  [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8], [9, 10],
+  [11, 12], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
+  [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20], [11, 23],
+  [12, 24], [23, 24], [23, 25], [24, 26], [25, 27], [26, 28], [27, 29],
+  [28, 30], [29, 31], [30, 32], [27, 31], [28, 32],
+];
+
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
@@ -71,6 +85,16 @@ export default function RealtimeDetector() {
   const frameCounterRef = useRef(0);
   const messageCounterRef = useRef(0);
   const runningRef = useRef(false);
+  const lastDetectionsRef = useRef<Detection[]>([]);
+  const poseLandmarksRef = useRef<PosePoint[][]>([]);
+  const previousPoseLandmarksRef = useRef<PosePoint[][]>([]);
+  const poseMotionRef = useRef<number>(0);
+  const poseLastVideoTimeRef = useRef<number>(-1);
+  const poseLandmarkerRef = useRef<{
+    detectForVideo: (video: HTMLVideoElement, timestampMs: number) => { landmarks?: PosePoint[][] };
+    close?: () => void;
+  } | null>(null);
+  const poseLoadErrorRef = useRef<string | null>(null);
 
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<string>("Idle");
@@ -146,6 +170,12 @@ export default function RealtimeDetector() {
       y: trackedAimDetection.y + trackedAimDetection.h / 2,
     };
   }, [trackedAimDetection]);
+
+  const shouldRunPose = useMemo(() => {
+    const hasPerson = lastDetections.some((d) => d.label === "person");
+    const hasFace = lastDetections.some((d) => d.label === "face");
+    return hasPerson && hasFace;
+  }, [lastDetections]);
 
   useEffect(() => {
     fpsRef.current = fps;
@@ -261,6 +291,7 @@ export default function RealtimeDetector() {
         setLastMs(data.ms ?? 0);
         setLastCount(detections.length);
         setLastDetections(detections);
+        lastDetectionsRef.current = detections;
 
         setSelectedTrackId((current) => {
           if (current !== null && detections.some((d) => d.track_id === current)) {
@@ -363,6 +394,89 @@ export default function RealtimeDetector() {
         ctx.lineWidth = 1.4;
         ctx.stroke();
       }
+    }
+
+    drawPoseOverlay(ctx, canvas.width, canvas.height);
+  }
+
+  function drawPoseOverlay(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number
+  ) {
+    const poseLandmarks = poseLandmarksRef.current;
+    if (!poseLandmarks.length) return;
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(127, 255, 141, 0.88)";
+    ctx.lineWidth = 2;
+    ctx.fillStyle = "rgba(127, 255, 141, 0.95)";
+
+    for (const skeleton of poseLandmarks) {
+      for (const [a, b] of POSE_CONNECTIONS) {
+        const p1 = skeleton[a];
+        const p2 = skeleton[b];
+        if (!p1 || !p2) continue;
+        if ((p1.visibility ?? 1) < 0.35 || (p2.visibility ?? 1) < 0.35) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(p1.x * canvasWidth, p1.y * canvasHeight);
+        ctx.lineTo(p2.x * canvasWidth, p2.y * canvasHeight);
+        ctx.stroke();
+      }
+
+      for (const p of skeleton) {
+        if (!p || (p.visibility ?? 1) < 0.35) continue;
+        ctx.beginPath();
+        ctx.arc(p.x * canvasWidth, p.y * canvasHeight, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    const motion = poseMotionRef.current;
+    const movementLabel =
+      motion >= 0.012 ? "HIGH" : motion >= 0.006 ? "MED" : motion > 0 ? "LOW" : "N/A";
+    const motionText = `POSE MOTION: ${movementLabel} (${(motion * 1000).toFixed(1)})`;
+    const padX = 7;
+    const padY = 5;
+    const textW = ctx.measureText(motionText).width;
+    const x = 10;
+    const y = 10;
+    const boxH = 22;
+
+    ctx.fillStyle = "rgba(8, 32, 18, 0.82)";
+    ctx.strokeStyle = "rgba(127, 255, 141, 0.9)";
+    ctx.lineWidth = 1.4;
+    ctx.fillRect(x, y, textW + padX * 2, boxH);
+    ctx.strokeRect(x, y, textW + padX * 2, boxH);
+    ctx.fillStyle = "rgba(200, 255, 206, 0.98)";
+    ctx.fillText(motionText, x + padX, y + padY);
+    ctx.restore();
+  }
+
+  async function ensurePoseLandmarker() {
+    if (poseLandmarkerRef.current || poseLoadErrorRef.current) return;
+    try {
+      const { FilesetResolver, PoseLandmarker } = await import("@mediapipe/tasks-vision");
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+      );
+      const pose = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+        },
+        runningMode: "VIDEO",
+        numPoses: 2,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      poseLandmarkerRef.current = pose;
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      poseLoadErrorRef.current = message;
+      console.error("[vision] Pose load failed:", message);
     }
   }
 
@@ -572,9 +686,82 @@ export default function RealtimeDetector() {
       disconnectWS();
       sendingRef.current = false;
       awaitingResponseRef.current = false;
+      poseLandmarksRef.current = [];
+      previousPoseLandmarksRef.current = [];
+      poseMotionRef.current = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running]);
+
+  useEffect(() => {
+    if (!running) return;
+
+    let raf = 0;
+    let cancelled = false;
+
+    const runPoseFrame = async () => {
+      if (cancelled) return;
+
+      const video = videoRef.current;
+      if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        raf = window.requestAnimationFrame(runPoseFrame);
+        return;
+      }
+
+      if (!shouldRunPose) {
+        poseLandmarksRef.current = [];
+        previousPoseLandmarksRef.current = [];
+        poseMotionRef.current = 0;
+        drawOverlay(lastDetectionsRef.current);
+        raf = window.requestAnimationFrame(runPoseFrame);
+        return;
+      }
+
+      await ensurePoseLandmarker();
+      const pose = poseLandmarkerRef.current;
+
+      if (pose && video.currentTime !== poseLastVideoTimeRef.current) {
+        poseLastVideoTimeRef.current = video.currentTime;
+        const result = pose.detectForVideo(video, performance.now());
+        const landmarks = result.landmarks ?? [];
+
+        if (landmarks.length && previousPoseLandmarksRef.current.length) {
+          const prev = previousPoseLandmarksRef.current[0] ?? [];
+          const curr = landmarks[0] ?? [];
+          let displacement = 0;
+          let count = 0;
+
+          for (let i = 0; i < Math.min(prev.length, curr.length); i += 1) {
+            const pPrev = prev[i];
+            const pCurr = curr[i];
+            if (!pPrev || !pCurr) continue;
+            if ((pPrev.visibility ?? 1) < 0.4 || (pCurr.visibility ?? 1) < 0.4) continue;
+            const dx = pCurr.x - pPrev.x;
+            const dy = pCurr.y - pPrev.y;
+            displacement += Math.hypot(dx, dy);
+            count += 1;
+          }
+
+          poseMotionRef.current = count ? displacement / count : 0;
+        } else {
+          poseMotionRef.current = 0;
+        }
+
+        poseLandmarksRef.current = landmarks;
+        previousPoseLandmarksRef.current = landmarks;
+        drawOverlay(lastDetectionsRef.current);
+      }
+
+      raf = window.requestAnimationFrame(runPoseFrame);
+    };
+
+    raf = window.requestAnimationFrame(runPoseFrame);
+    return () => {
+      cancelled = true;
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, shouldRunPose]);
 
   useEffect(() => {
     let raf = 0;
@@ -598,6 +785,8 @@ export default function RealtimeDetector() {
       stopCamera();
       disconnectWS();
       clearReconnectTimer();
+      poseLandmarkerRef.current?.close?.();
+      poseLandmarkerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -614,6 +803,10 @@ export default function RealtimeDetector() {
     setLastCount(0);
     setLastDetections([]);
     setSelectedTrackId(null);
+    lastDetectionsRef.current = [];
+    poseLandmarksRef.current = [];
+    previousPoseLandmarksRef.current = [];
+    poseMotionRef.current = 0;
   }
 
   return (

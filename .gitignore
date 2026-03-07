@@ -1,0 +1,8 @@
+# Local runtime logs
+*.log
+frontend/*.log
+backend/*.log
+
+# Local virtual environments
+backend/.venv311/
+backend/.venv/
