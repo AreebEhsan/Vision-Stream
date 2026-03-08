@@ -37,6 +37,11 @@ type PosePoint = {
   visibility?: number;
 };
 
+type FaceConnection = {
+  start: number;
+  end: number;
+};
+
 const POSE_CONNECTIONS: Array<[number, number]> = [
   [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8], [9, 10],
   [11, 12], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
@@ -90,11 +95,19 @@ export default function RealtimeDetector() {
   const previousPoseLandmarksRef = useRef<PosePoint[][]>([]);
   const poseMotionRef = useRef<number>(0);
   const poseLastVideoTimeRef = useRef<number>(-1);
+  const faceLandmarksRef = useRef<PosePoint[][]>([]);
+  const faceLastVideoTimeRef = useRef<number>(-1);
+  const faceConnectionsRef = useRef<FaceConnection[]>([]);
   const poseLandmarkerRef = useRef<{
     detectForVideo: (video: HTMLVideoElement, timestampMs: number) => { landmarks?: PosePoint[][] };
     close?: () => void;
   } | null>(null);
+  const faceLandmarkerRef = useRef<{
+    detectForVideo: (video: HTMLVideoElement, timestampMs: number) => { faceLandmarks?: PosePoint[][] };
+    close?: () => void;
+  } | null>(null);
   const poseLoadErrorRef = useRef<string | null>(null);
+  const faceLoadErrorRef = useRef<string | null>(null);
 
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<string>("Idle");
@@ -176,6 +189,11 @@ export default function RealtimeDetector() {
     const hasFace = lastDetections.some((d) => d.label === "face");
     return hasPerson && hasFace;
   }, [lastDetections]);
+
+  const shouldRunFaceMesh = useMemo(
+    () => lastDetections.some((d) => d.label === "face"),
+    [lastDetections]
+  );
 
   useEffect(() => {
     fpsRef.current = fps;
@@ -396,7 +414,44 @@ export default function RealtimeDetector() {
       }
     }
 
+    drawFaceMeshOverlay(ctx, canvas.width, canvas.height);
     drawPoseOverlay(ctx, canvas.width, canvas.height);
+  }
+
+  function drawFaceMeshOverlay(
+    ctx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number
+  ) {
+    const faceLandmarks = faceLandmarksRef.current;
+    if (!faceLandmarks.length) return;
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(118, 255, 214, 0.62)";
+    ctx.lineWidth = 0.9;
+    ctx.fillStyle = "rgba(165, 255, 229, 0.82)";
+
+    const connections = faceConnectionsRef.current;
+    for (const face of faceLandmarks) {
+      for (const edge of connections) {
+        const p1 = face[edge.start];
+        const p2 = face[edge.end];
+        if (!p1 || !p2) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(p1.x * canvasWidth, p1.y * canvasHeight);
+        ctx.lineTo(p2.x * canvasWidth, p2.y * canvasHeight);
+        ctx.stroke();
+      }
+
+      for (const p of face) {
+        if (!p) continue;
+        ctx.beginPath();
+        ctx.arc(p.x * canvasWidth, p.y * canvasHeight, 1.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
   }
 
   function drawPoseOverlay(
@@ -477,6 +532,42 @@ export default function RealtimeDetector() {
       const message = e instanceof Error ? e.message : String(e);
       poseLoadErrorRef.current = message;
       console.error("[vision] Pose load failed:", message);
+    }
+  }
+
+  async function ensureFaceLandmarker() {
+    if (faceLandmarkerRef.current || faceLoadErrorRef.current) return;
+    try {
+      const { FilesetResolver, FaceLandmarker } = await import("@mediapipe/tasks-vision");
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+      );
+      const face = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
+        },
+        runningMode: "VIDEO",
+        numFaces: 2,
+        minFaceDetectionConfidence: 0.45,
+        minFacePresenceConfidence: 0.45,
+        minTrackingConfidence: 0.45,
+      });
+
+      faceLandmarkerRef.current = face as unknown as {
+        detectForVideo: (
+          video: HTMLVideoElement,
+          timestampMs: number
+        ) => { faceLandmarks?: PosePoint[][] };
+        close?: () => void;
+      };
+
+      const tesselation = (FaceLandmarker.FACE_LANDMARKS_TESSELATION ?? []) as FaceConnection[];
+      faceConnectionsRef.current = tesselation;
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      faceLoadErrorRef.current = message;
+      console.error("[vision] Face mesh load failed:", message);
     }
   }
 
@@ -689,6 +780,8 @@ export default function RealtimeDetector() {
       poseLandmarksRef.current = [];
       previousPoseLandmarksRef.current = [];
       poseMotionRef.current = 0;
+      faceLandmarksRef.current = [];
+      faceLastVideoTimeRef.current = -1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running]);
@@ -708,19 +801,32 @@ export default function RealtimeDetector() {
         return;
       }
 
-      if (!shouldRunPose) {
+      const shouldProcessThisFrame =
+        (shouldRunPose && video.currentTime !== poseLastVideoTimeRef.current) ||
+        (shouldRunFaceMesh && video.currentTime !== faceLastVideoTimeRef.current);
+
+      if (shouldRunFaceMesh) {
+        await ensureFaceLandmarker();
+        const face = faceLandmarkerRef.current;
+        if (face && video.currentTime !== faceLastVideoTimeRef.current) {
+          faceLastVideoTimeRef.current = video.currentTime;
+          const result = face.detectForVideo(video, performance.now());
+          faceLandmarksRef.current = result.faceLandmarks ?? [];
+        }
+      } else {
+        faceLandmarksRef.current = [];
+      }
+
+      if (shouldRunPose) {
+        await ensurePoseLandmarker();
+      } else {
         poseLandmarksRef.current = [];
         previousPoseLandmarksRef.current = [];
         poseMotionRef.current = 0;
-        drawOverlay(lastDetectionsRef.current);
-        raf = window.requestAnimationFrame(runPoseFrame);
-        return;
       }
 
-      await ensurePoseLandmarker();
       const pose = poseLandmarkerRef.current;
-
-      if (pose && video.currentTime !== poseLastVideoTimeRef.current) {
+      if (shouldRunPose && pose && video.currentTime !== poseLastVideoTimeRef.current) {
         poseLastVideoTimeRef.current = video.currentTime;
         const result = pose.detectForVideo(video, performance.now());
         const landmarks = result.landmarks ?? [];
@@ -749,6 +855,9 @@ export default function RealtimeDetector() {
 
         poseLandmarksRef.current = landmarks;
         previousPoseLandmarksRef.current = landmarks;
+      }
+
+      if (shouldProcessThisFrame) {
         drawOverlay(lastDetectionsRef.current);
       }
 
@@ -761,7 +870,7 @@ export default function RealtimeDetector() {
       if (raf) window.cancelAnimationFrame(raf);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, shouldRunPose]);
+  }, [running, shouldRunPose, shouldRunFaceMesh]);
 
   useEffect(() => {
     let raf = 0;
@@ -787,6 +896,8 @@ export default function RealtimeDetector() {
       clearReconnectTimer();
       poseLandmarkerRef.current?.close?.();
       poseLandmarkerRef.current = null;
+      faceLandmarkerRef.current?.close?.();
+      faceLandmarkerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -807,6 +918,8 @@ export default function RealtimeDetector() {
     poseLandmarksRef.current = [];
     previousPoseLandmarksRef.current = [];
     poseMotionRef.current = 0;
+    faceLandmarksRef.current = [];
+    faceLastVideoTimeRef.current = -1;
   }
 
   return (
