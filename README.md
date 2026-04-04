@@ -1,5 +1,3 @@
-# 📄 Overview.md
-
 ## 📌 Project Overview
 
 This project is a real-time computer vision system that processes live webcam video streams in the browser, performs object detection on the backend, and renders interactive augmented overlays on the frontend.
