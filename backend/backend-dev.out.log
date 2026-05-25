@@ -1,0 +1,31 @@
+Loading microsoft/Florence-2-large on cpu (dtype=torch.float32)...
+Florence-2 ready.
+WS connected: Address(host='127.0.0.1', port=51868)
+WS frame bytes: 55151
+Inference start
+[florence OD raw] 21 boxes, labels=['cabinetry', 'chair', 'chair', 'chair', 'clock', 'fireplace', 'houseplant', 'kitchen & dining room table', 'lamp', 'person', 'person', 'picnic basket', 'radiator', 'television', 'vase', 'vase', 'vase', 'vase', 'vase', 'vase', 'vase']
+[florence grounding raw] 1 boxes, labels=['a human face']
+Inference done ms: 16421
+Sent detections: 22
+WS error: Cannot call "receive" once a disconnect message has been received.
+INFO:     127.0.0.1:50756 - "GET /health HTTP/1.1" 200 OK
+WS connected: Address(host='127.0.0.1', port=62252)
+WS frame bytes: 20868
+Inference start
+[florence OD raw] 4 boxes, labels=['fire alarm', 'hinge', 'person', 'vent']
+[florence grounding raw] 1 boxes, labels=['a human face']
+Inference done ms: 17871
+Sent detections: 5
+WS frame bytes: 20628
+Inference start
+[florence OD raw] 2 boxes, labels=['hinge', 'person']
+[florence grounding raw] 1 boxes, labels=['a human face']
+Inference done ms: 10301
+Sent detections: 3
+WS frame bytes: 23151
+Inference start
+[florence OD raw] 5 boxes, labels=['bottle', 'clock', 'hinge', 'person', 'person']
+[florence grounding raw] 1 boxes, labels=['a human face']
+Inference done ms: 11079
+Sent detections: 6
+WS error: Cannot call "receive" once a disconnect message has been received.

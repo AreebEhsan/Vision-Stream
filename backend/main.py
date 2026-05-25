@@ -4,13 +4,14 @@ import math
 import os
 import threading
 import time
+from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
-import numpy as np
+import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from ultralytics import YOLO
+from PIL import Image
+from transformers import AutoModelForCausalLM, AutoProcessor
 
 app = FastAPI()
 
@@ -27,22 +28,80 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load a fast general-purpose detector (COCO 80 classes)
-# Options: yolov8n.pt (fastest), yolov8s.pt (better), yolov8m.pt (heavier)
-model = YOLO("yolov8n.pt")
-model_lock = threading.Lock()
+FLORENCE_MODEL_ID = os.getenv("FLORENCE_MODEL_ID", "microsoft/Florence-2-large")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TORCH_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
-# Lightweight face detector for face-priority targeting.
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+print(f"Loading {FLORENCE_MODEL_ID} on {DEVICE} (dtype={TORCH_DTYPE})...")
+florence_model = (
+    AutoModelForCausalLM.from_pretrained(
+        FLORENCE_MODEL_ID,
+        trust_remote_code=True,
+        torch_dtype=TORCH_DTYPE,
+        attn_implementation="eager",
+    )
+    .to(DEVICE)
+    .eval()
 )
-
-# Optional: if you have GPU + CUDA, Ultralytics will use it automatically.
-# model.to("cuda")  # Only if your setup supports it.
+florence_processor = AutoProcessor.from_pretrained(
+    FLORENCE_MODEL_ID,
+    trust_remote_code=True,
+)
+model_lock = threading.Lock()
+print("Florence-2 ready.")
 
 HORIZONTAL_FOV_DEG = 68.0
 MAX_TRACK_MISSES = 12
 TRACK_IOU_THRESHOLD = 0.30
+DEDUP_IOU_THRESHOLD = 0.55
+
+OD_PROMPT = "<OD>"
+GROUNDING_PROMPT = "<CAPTION_TO_PHRASE_GROUNDING>"
+GROUNDING_TEXT = "a human face"
+
+# Florence-2 emits free-form natural-language labels. Collapse the common
+# variants down to the canonical names that OBJECT_META / REAL_WORLD_WIDTH_M
+# and (critically) the frontend branch on.
+LABEL_NORMALIZATION: Dict[str, str] = {
+    "human face": "face",
+    "face": "face",
+    "head": "face",
+    "human": "person",
+    "person": "person",
+    "people": "person",
+    "man": "person",
+    "woman": "person",
+    "boy": "person",
+    "girl": "person",
+    "child": "person",
+    "pedestrian": "person",
+    "automobile": "car",
+    "vehicle": "car",
+    "car": "car",
+    "sedan": "car",
+    "suv": "car",
+    "truck": "truck",
+    "pickup truck": "truck",
+    "bus": "bus",
+    "bicycle": "bicycle",
+    "bike": "bicycle",
+    "motorcycle": "motorcycle",
+    "motorbike": "motorcycle",
+    "scooter": "motorcycle",
+    "dog": "dog",
+    "puppy": "dog",
+    "cat": "cat",
+    "kitten": "cat",
+    "bottle": "bottle",
+    "water bottle": "bottle",
+    "cell phone": "cell phone",
+    "cellphone": "cell phone",
+    "mobile phone": "cell phone",
+    "phone": "cell phone",
+    "smartphone": "cell phone",
+    "laptop": "laptop",
+    "notebook computer": "laptop",
+}
 
 OBJECT_META: Dict[str, Dict[str, Any]] = {
     "face": {"category": "biometric", "uses": ["identity", "attention", "access control"]},
@@ -85,12 +144,11 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-def decode_jpeg_bytes_to_bgr(jpeg_bytes: bytes) -> np.ndarray:
-    """Decode JPEG bytes into an OpenCV BGR image."""
-    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Failed to decode image (cv2.imdecode returned None).")
+def decode_jpeg_bytes_to_pil(jpeg_bytes: bytes) -> Image.Image:
+    """Decode JPEG bytes into a PIL RGB image."""
+    img = Image.open(BytesIO(jpeg_bytes))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
     return img
 
 
@@ -138,77 +196,147 @@ def estimate_angle_deg(cx_px: float, image_width: int) -> float:
     return round(float(angle), 2)
 
 
-def raw_yolo_detections(img_bgr: np.ndarray) -> Tuple[int, int, List[Dict[str, Any]]]:
-    """Run YOLO inference and return detections in pixel-space xyxy."""
-    h, w = img_bgr.shape[:2]
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+def normalize_label(raw: str) -> Tuple[str, str]:
+    """Map a Florence-2 free-form label to (canonical_label, detection_type)."""
+    key = (raw or "").strip().lower()
+    label = LABEL_NORMALIZATION.get(key, key or "object")
+    det_type = "face" if label == "face" else "object"
+    return label, det_type
 
-    with model_lock:
-        # Keep all classes active and use a slightly lower threshold so non-human
-        # objects still surface in typical webcam scenes.
-        results = model.predict(img_rgb, imgsz=960, conf=0.20, iou=0.45, verbose=False)
 
-    detections: List[Dict[str, Any]] = []
-    r = results[0]
-    if r.boxes is None:
-        return w, h, detections
+def _run_florence_task(
+    pil_image: Image.Image,
+    task_prompt: str,
+    text_input: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Run one Florence-2 inference. Returns parsed result or None on failure."""
+    prompt = task_prompt if text_input is None else f"{task_prompt}{text_input}"
+    try:
+        with model_lock:
+            inputs = florence_processor(
+                text=prompt, images=pil_image, return_tensors="pt"
+            )
+            input_ids = inputs["input_ids"].to(DEVICE)
+            pixel_values = inputs["pixel_values"].to(DEVICE, dtype=TORCH_DTYPE)
 
-    names = model.names
+            with torch.inference_mode():
+                generated_ids = florence_model.generate(
+                    input_ids=input_ids,
+                    pixel_values=pixel_values,
+                    max_new_tokens=1024,
+                    num_beams=3,
+                    do_sample=False,
+                )
 
-    for b in r.boxes:
-        x1, y1, x2, y2 = b.xyxy[0].tolist()
-        conf = float(b.conf[0].item()) if b.conf is not None else 0.0
-        cls_id = int(b.cls[0].item()) if b.cls is not None else -1
-        label = names.get(cls_id, str(cls_id))
+            generated_text = florence_processor.batch_decode(
+                generated_ids, skip_special_tokens=False
+            )[0]
 
-        x1 = max(0.0, min(x1, w - 1))
-        y1 = max(0.0, min(y1, h - 1))
-        x2 = max(0.0, min(x2, w - 1))
-        y2 = max(0.0, min(y2, h - 1))
-
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        detections.append(
-            {
-                "label": label,
-                "type": "object",
-                "conf": conf,
-                "x1": x1,
-                "y1": y1,
-                "x2": x2,
-                "y2": y2,
-            }
+        return florence_processor.post_process_generation(
+            generated_text,
+            task=task_prompt,
+            image_size=(pil_image.width, pil_image.height),
         )
+    except Exception as exc:
+        import traceback
+        print(f"Florence-2 inference failed for {task_prompt!r}: {exc}", flush=True)
+        traceback.print_exc()
+        return None
 
-    return w, h, detections
+
+def _clip_bbox(
+    bbox: List[float], width: int, height: int
+) -> Optional[Tuple[float, float, float, float]]:
+    if len(bbox) < 4:
+        return None
+    x1, y1, x2, y2 = bbox[:4]
+    x1 = max(0.0, min(float(x1), width - 1))
+    y1 = max(0.0, min(float(y1), height - 1))
+    x2 = max(0.0, min(float(x2), width - 1))
+    y2 = max(0.0, min(float(y2), height - 1))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
 
 
-def raw_face_detections(img_bgr: np.ndarray) -> List[Dict[str, Any]]:
-    """Run Haar cascade face detection and return pixel-space xyxy boxes."""
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(36, 36),
+def _suppress_duplicates(
+    dets: List[Dict[str, Any]], iou_thresh: float = DEDUP_IOU_THRESHOLD
+) -> List[Dict[str, Any]]:
+    """Drop overlapping same-label boxes, keeping the higher-confidence one."""
+    keep: List[Dict[str, Any]] = []
+    for det in sorted(dets, key=lambda d: d["conf"], reverse=True):
+        bbox = (det["x1"], det["y1"], det["x2"], det["y2"])
+        duplicate = False
+        for other in keep:
+            if other["label"] != det["label"]:
+                continue
+            other_bbox = (other["x1"], other["y1"], other["x2"], other["y2"])
+            if iou_xyxy(bbox, other_bbox) > iou_thresh:
+                duplicate = True
+                break
+        if not duplicate:
+            keep.append(det)
+    return keep
+
+
+def florence_detect_all(
+    pil_image: Image.Image,
+) -> Tuple[int, int, List[Dict[str, Any]]]:
+    """Unified detection: <OD> for general objects + <CAPTION_TO_PHRASE_GROUNDING> for faces."""
+    width, height = pil_image.width, pil_image.height
+    detections: List[Dict[str, Any]] = []
+
+    od_result = _run_florence_task(pil_image, OD_PROMPT)
+    if od_result and OD_PROMPT in od_result:
+        block = od_result[OD_PROMPT] or {}
+        boxes = block.get("bboxes", []) or []
+        labels = block.get("labels", []) or []
+        print(f"[florence OD raw] {len(labels)} boxes, labels={labels}", flush=True)
+        for raw_label, bbox in zip(labels, boxes):
+            clipped = _clip_bbox(bbox, width, height)
+            if clipped is None:
+                continue
+            x1, y1, x2, y2 = clipped
+            label, det_type = normalize_label(str(raw_label))
+            detections.append(
+                {
+                    "label": label,
+                    "type": det_type,
+                    "conf": 0.85,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+            )
+
+    grounding_result = _run_florence_task(
+        pil_image, GROUNDING_PROMPT, text_input=GROUNDING_TEXT
     )
+    if grounding_result and GROUNDING_PROMPT in grounding_result:
+        block = grounding_result[GROUNDING_PROMPT] or {}
+        boxes = block.get("bboxes", []) or []
+        grd_labels = block.get("labels", []) or []
+        print(f"[florence grounding raw] {len(boxes)} boxes, labels={grd_labels}", flush=True)
+        for bbox in boxes:
+            clipped = _clip_bbox(bbox, width, height)
+            if clipped is None:
+                continue
+            x1, y1, x2, y2 = clipped
+            detections.append(
+                {
+                    "label": "face",
+                    "type": "face",
+                    "conf": 0.90,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+            )
 
-    detections: List[Dict[str, Any]] = []
-    for x, y, w, h in faces:
-        detections.append(
-            {
-                "label": "face",
-                "type": "face",
-                "conf": 0.95,
-                "x1": float(x),
-                "y1": float(y),
-                "x2": float(x + w),
-                "y2": float(y + h),
-            }
-        )
-
-    return detections
+    detections = _suppress_duplicates(detections)
+    return width, height, detections
 
 
 class SimpleTracker:
@@ -298,12 +426,11 @@ def enrich_and_normalize(
 
 def process_jpeg_frame(jpeg_bytes: bytes, tracker: SimpleTracker) -> Dict[str, Any]:
     t0 = time.time()
-    img = decode_jpeg_bytes_to_bgr(jpeg_bytes)
+    img = decode_jpeg_bytes_to_pil(jpeg_bytes)
 
-    width, height, yolo_dets = raw_yolo_detections(img)
-    face_dets = raw_face_detections(img)
+    width, height, raw_dets = florence_detect_all(img)
 
-    tracked = tracker.update(yolo_dets + face_dets)
+    tracked = tracker.update(raw_dets)
     detections = enrich_and_normalize(tracked, width, height)
 
     primary = detections[0]["track_id"] if detections else None
@@ -349,7 +476,10 @@ async def ws_endpoint(websocket: WebSocket):
                 print("Sent detections:", len(payload.get("detections", [])))
             except Exception as e:
                 print("Frame processing error:", str(e))
-                await websocket.send_text(json.dumps({"error": str(e)}))
+                try:
+                    await websocket.send_text(json.dumps({"error": str(e)}))
+                except Exception as send_err:
+                    print("Failed to forward error to client:", send_err)
 
             await asyncio.sleep(0)
 
